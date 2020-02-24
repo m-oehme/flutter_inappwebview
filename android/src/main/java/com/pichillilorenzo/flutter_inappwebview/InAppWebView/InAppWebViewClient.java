@@ -44,6 +44,7 @@ import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.regex.Matcher;
 
 import io.flutter.plugin.common.MethodChannel;
@@ -69,8 +70,9 @@ public class InAppWebViewClient extends WebViewClient {
   public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
     InAppWebView webView = (InAppWebView) view;
     if (webView.options.useShouldOverrideUrlLoading) {
+      boolean overrideLoading;
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-        onShouldOverrideUrlLoading(
+        overrideLoading = onShouldOverrideUrlLoading(
                 request.getUrl().toString(),
                 request.getMethod(),
                 request.getRequestHeaders(),
@@ -78,7 +80,7 @@ public class InAppWebViewClient extends WebViewClient {
                 request.hasGesture(),
                 request.isRedirect());
       } else {
-        onShouldOverrideUrlLoading(
+        overrideLoading = onShouldOverrideUrlLoading(
                 request.getUrl().toString(),
                 request.getMethod(),
                 request.getRequestHeaders(),
@@ -88,7 +90,7 @@ public class InAppWebViewClient extends WebViewClient {
       }
       if (webView.regexToCancelSubFramesLoadingCompiled != null) {
         if (request.isForMainFrame())
-          return true;
+          return overrideLoading;
         else {
           Matcher m = webView.regexToCancelSubFramesLoadingCompiled.matcher(request.getUrl().toString());
           if (m.matches())
@@ -97,9 +99,7 @@ public class InAppWebViewClient extends WebViewClient {
             return false;
         }
       } else {
-        // There isn't any way to load an URL for a frame that is not the main frame,
-        // so if the request is not for the main frame, the navigation is allowed.
-        return request.isForMainFrame();
+        return overrideLoading;
       }
     }
     return false;
@@ -108,13 +108,12 @@ public class InAppWebViewClient extends WebViewClient {
   @Override
   public boolean shouldOverrideUrlLoading(WebView webView, String url) {
     if (((inAppBrowserActivity != null) ? inAppBrowserActivity.webView : flutterWebView.webView).options.useShouldOverrideUrlLoading) {
-      onShouldOverrideUrlLoading(url, "GET", null,true, false, false);
-      return true;
+      return onShouldOverrideUrlLoading(url, "GET", null,true, false, false);
     }
     return false;
   }
 
-  public void onShouldOverrideUrlLoading(final String url, final String method, final Map<String, String> headers, final boolean isForMainFrame, boolean hasGesture, boolean isRedirect) {
+  public boolean onShouldOverrideUrlLoading(final String url, final String method, final Map<String, String> headers, final boolean isForMainFrame, boolean hasGesture, boolean isRedirect) {
     Map<String, Object> obj = new HashMap<>();
     if (inAppBrowserActivity != null)
       obj.put("uuid", inAppBrowserActivity.uuid);
@@ -125,6 +124,11 @@ public class InAppWebViewClient extends WebViewClient {
     obj.put("androidHasGesture", hasGesture);
     obj.put("androidIsRedirect", isRedirect);
     obj.put("iosWKNavigationType", null);
+
+    // Using a BlockingQueue to Block the thread and waiting for the result from MethodChannel
+    // Not an ideal solution but it works.
+    final ArrayBlockingQueue<Boolean> futureBoolean = new ArrayBlockingQueue<>(1);
+
     getChannel().invokeMethod("shouldOverrideUrlLoading", obj, new MethodChannel.Result() {
       @Override
       public void success(Object response) {
@@ -134,19 +138,12 @@ public class InAppWebViewClient extends WebViewClient {
           if (action != null) {
             switch (action) {
               case 1:
-                if (isForMainFrame) {
-                  // There isn't any way to load an URL for a frame that is not the main frame,
-                  // so call this only on main frame.
-                  InAppWebView webView = ((inAppBrowserActivity != null) ? inAppBrowserActivity.webView : flutterWebView.webView);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-                    webView.loadUrl(url, headers);
-                  else
-                    webView.loadUrl(url);
-                }
+                futureBoolean.offer(false);
                 return;
               case 0:
-              default:
+                futureBoolean.offer(true);
                 return;
+              default:
             }
           }
         }
@@ -162,6 +159,14 @@ public class InAppWebViewClient extends WebViewClient {
 
       }
     });
+
+
+    try {
+      return futureBoolean.isEmpty() ? false : futureBoolean.take();
+    } catch (InterruptedException e) {
+      e.printStackTrace();
+    }
+    return false;
   }
 
   @Override
